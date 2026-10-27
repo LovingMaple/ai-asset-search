@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>에셋 검색</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/web/style.css">
+<script type="importmap">
+{ "imports": {
+  "three": "/node_modules/three/build/three.module.js",
+  "three/addons/": "/node_modules/three/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo">◧</span>
+    <div>
+      <h1>에셋 검색</h1>
+      <p id="stat" class="muted">불러오는 중…</p>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="searchbar">
+    <div class="modes" role="tablist">
+      <button class="mode on" data-mode="ai" role="tab">AI 검색</button>
+      <button class="mode" data-mode="name" role="tab">이름 검색</button>
+    </div>
+    <form id="form" class="query">
+      <input id="q" autocomplete="off" placeholder="예: 중세풍 붉은 상의, 귀여운 날개 달린 몬스터, red medieval top">
+      <button id="go" type="submit">검색</button>
+    </form>
+    <div class="filters">
+      <select id="fType"><option value="">전체 분류</option></select>
+      <select id="fPack"><option value="">전체 팩</option></select>
+      <label class="check"><input type="checkbox" id="fRig"> 리깅된 것만</label>
+      <label class="check name-only"><input type="checkbox" id="fKw" checked> 라벨 키워드 포함</label>
+    </div>
+    <div id="examples" class="examples"></div>
+  </section>
+
+  <section id="banner" class="banner" hidden></section>
+  <section id="grid" class="grid"></section>
+  <p id="empty" class="empty" hidden></p>
+</main>
+
+<aside id="detail" class="detail" hidden>
+  <div class="detail-inner">
+    <button id="close" class="close" aria-label="닫기">✕</button>
+    <div class="viewer"><canvas id="view"></canvas><span id="viewMsg" class="viewmsg">3D 불러오는 중…</span></div>
+    <div id="info" class="info"></div>
+  </div>
+</aside>
+
+<script type="module" src="/web/app.js"></script>
+</body>
+</html>

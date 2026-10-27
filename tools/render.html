@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<script type="importmap">
+{ "imports": {
+  "three": "/node_modules/three/build/three.module.js",
+  "three/addons/": "/node_modules/three/examples/jsm/"
+} }
+</script>
+</head>
+<body style="margin:0;background:#fff">
+<script type="module">
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { makeManager, applyMaterials } from '/web/fbx-materials.js';
+
+const GRID = 1024, CELL = GRID / 2, CARD = 512;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.setScissorTest(true);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xe8e8ec);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a95, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.0);
+scene.add(sun);
+const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 1e6);
+const fbxLoader = new FBXLoader(makeManager());
+
+function viewDir(azDeg, elDeg) {
+  const az = THREE.MathUtils.degToRad(azDeg), el = THREE.MathUtils.degToRad(elDeg);
+  return new THREE.Vector3(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
+}
+
+function shoot(sphere, dir, x, y, size) {
+  const dist = sphere.radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.05;
+  camera.position.copy(sphere.center).addScaledVector(dir, dist);
+  camera.near = dist / 100; camera.far = dist * 10;
+  camera.lookAt(sphere.center);
+  camera.updateProjectionMatrix();
+  sun.position.copy(camera.position).add(new THREE.Vector3(dist * 0.4, dist * 0.8, 0));
+  sun.target.position.copy(sphere.center);
+  sun.target.updateMatrixWorld();
+  renderer.setViewport(x, y, size, size);
+  renderer.setScissor(x, y, size, size);
+  renderer.render(scene, camera);
+}
+
+window.renderAsset = async (entry) => {
+  const obj = await fbxLoader.loadAsync('/' + entry.file);
+  const stats = await applyMaterials(obj, entry);
+  if (stats.meshes === 0) return { empty: true, stats };
+
+  scene.add(obj);
+  obj.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(obj, true);
+  const size = box.getSize(new THREE.Vector3());
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const mx = Math.max(size.x, size.y, size.z) || 1;
+  stats.proportions = { w: +(size.x / mx).toFixed(2), h: +(size.y / mx).toFixed(2), d: +(size.z / mx).toFixed(2) };
+
+  // AI용 4분할: 앞3/4, 뒤3/4, 측면, 위
+  renderer.setSize(GRID, GRID, false);
+  shoot(sphere, viewDir(35, 20), 0, CELL, CELL);
+  shoot(sphere, viewDir(215, 20), CELL, CELL, CELL);
+  shoot(sphere, viewDir(90, 5), 0, 0, CELL);
+  shoot(sphere, viewDir(10, 70), CELL, 0, CELL);
+  const grid = renderer.domElement.toDataURL('image/jpeg', 0.88);
+
+  // 카드용 1장
+  renderer.setSize(CARD, CARD, false);
+  shoot(sphere, viewDir(35, 20), 0, 0, CARD);
+  const card = renderer.domElement.toDataURL('image/jpeg', 0.88);
+
+  scene.remove(obj);
+  obj.traverse(o => { if (o.isMesh) { o.geometry.dispose(); } });
+  return { grid, card, stats };
+};
+window.ready = true;
+</script>
+</body>
+</html>
