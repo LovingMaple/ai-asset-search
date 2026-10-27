@@ -83,7 +83,7 @@ function matchGroup(ft, g) {
   return hit || null;
 }
 
-export function runQuery(catalog, query) {
+export function runQuery(catalog, query, poolSize = 100) {
   const score = (e, strict) => {
     if (!e.labels) return null;
     const s = e.stats || {};
@@ -108,13 +108,75 @@ export function runQuery(catalog, query) {
     if (e.labels.confidence === '높음') sc += 0.5;
     return sc > 0 ? { e, score: sc, hits } : null;
   };
-  let results = catalog.map(e => score(e, true)).filter(Boolean);
-  let relaxed = false;
-  if (!results.length && query.must.length) {
-    // 모든 조건을 만족하는 게 없으면 일부만 맞는 것을 '비슷한 결과'로 보여준다
-    relaxed = true;
-    results = catalog.map(e => score(e, false)).filter(Boolean);
-  }
-  results.sort((a, b) => b.score - a.score);
-  return { results, relaxed };
+  // 1차 후보: 모든 필수 조건을 만족하는 것 먼저, 모자라면 일부만 맞는 것으로 poolSize 까지 채운다
+  const strict = catalog.map(e => score(e, true)).filter(Boolean).sort((a, b) => b.score - a.score);
+  const strictIds = new Set(strict.map(r => r.e.id));
+  const partial = catalog.filter(e => !strictIds.has(e.id)).map(e => score(e, false)).filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  for (const r of partial) r.partial = true;
+  const results = [...strict, ...partial].slice(0, Math.max(poolSize, strict.length));
+  return { results, strictCount: strict.length, relaxed: !strict.length && query.must.length > 0 };
+}
+
+// ---- 2차: Claude 가 에셋 목록을 직접 보고 고른다 ----
+// 목록 블록은 질문과 무관하게 항상 같은 내용/순서라 프롬프트 캐시에 올라간다 (catalog 가 바뀔 때만 새로 씀)
+const FULL_LIST_MAX = 1500; // 이보다 많으면 전체 대신 1차 후보만 보낸다
+
+function compactLine(e, i) {
+  const L = e.labels;
+  return `#${i} ${L.type}>${L.subtype} | ${L.name_ko} | 색:${L.colors.join(',')} | 재질:${L.materials.join(',')}` +
+    ` | ${L.style.join(',')} | 부위:${L.body_part} | ${e.stats?.skinned ? '스켈레탈' : '스태틱'} ${e.stats?.triangles ?? '?'}tri` +
+    ` | ${L.keywords_ko.slice(0, 5).join(',')}`;
+}
+
+const RERANK_SYSTEM = `당신은 게임 3D 에셋 검색 엔진의 최종 선별 담당입니다.
+아래에 팀의 에셋 목록이 있습니다(한 줄에 하나, #번호 | 분류>세부 | 이름 | 색 | 재질 | 스타일 | 착용 부위 | 메시 종류·폴리곤 | 키워드).
+사용자의 질문(한국어/영어, "~한 느낌" 같은 모호한 표현 포함)에 맞는 에셋을 고르세요.
+- tier "정확": 질문의 핵심을 모두 만족. tier "관련": 일부만 맞거나 대안으로 쓸 만함.
+- 질문과 단어가 겹치지 않아도 의미·분위기·용도가 맞으면 고르세요. 반대로 단어만 겹치고 의미가 다르면 고르지 마세요.
+- 정확 → 관련 순서, 같은 tier 안에서는 더 잘 맞는 순서로 최대 40개.
+- reason 은 왜 골랐는지 한국어 15자 안팎.
+- 1차 키워드 후보는 참고용입니다. 후보에 없는 에셋도 고를 수 있습니다.`;
+
+const RERANK_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['picks'],
+  properties: {
+    picks: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['n', 'tier', 'reason'],
+        properties: { n: { type: 'integer' }, tier: { type: 'string', enum: ['정확', '관련'] }, reason: { type: 'string' } },
+      },
+    },
+  },
+};
+
+export async function rerank(client, q, catalog, poolIds) {
+  const labeled = catalog.filter(e => e.labels).sort((a, b) => a.id.localeCompare(b.id));
+  const pool = new Set(poolIds);
+  const list = labeled.length <= FULL_LIST_MAX ? labeled : labeled.filter(e => pool.has(e.id));
+  const num = new Map(list.map((e, i) => [e.id, i]));
+  const msg = await client.messages.create({
+    model: MODEL,
+    max_tokens: 6000,
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: RERANK_SCHEMA } },
+    system: [
+      { type: 'text', text: RERANK_SYSTEM },
+      { type: 'text', text: `에셋 목록 (${list.length}개)\n` + list.map(compactLine).join('\n'), cache_control: { type: 'ephemeral' } },
+    ],
+    messages: [{
+      role: 'user',
+      content: `질문: ${q}\n1차 키워드 후보(관련도 순): ${poolIds.filter(id => num.has(id)).slice(0, 100).map(id => '#' + num.get(id)).join(', ') || '없음'}`,
+    }],
+  });
+  if (msg.stop_reason === 'refusal') throw new Error('요청을 처리할 수 없습니다');
+  const text = msg.content.filter(b => b.type === 'text').map(b => b.text).join('');
+  const seen = new Set();
+  const picks = JSON.parse(text).picks
+    .filter(p => list[p.n] && !seen.has(p.n) && seen.add(p.n))
+    .map(p => ({ id: list[p.n].id, tier: p.tier, reason: p.reason }));
+  const u = msg.usage;
+  const costUSD = (u.input_tokens * PRICE.input + (u.cache_creation_input_tokens || 0) * PRICE.input * 1.25 +
+    (u.cache_read_input_tokens || 0) * PRICE.input * 0.1 + u.output_tokens * PRICE.output);
+  return { picks, usage: u, costUSD: +costUSD.toFixed(4), listSize: list.length };
 }

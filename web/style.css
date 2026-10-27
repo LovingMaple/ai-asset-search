@@ -99,6 +99,19 @@ body.name-mode .name-only { display: inline-flex; }
 .tag.vague { background: var(--warn-soft); color: var(--warn); }
 .empty { text-align: center; color: var(--muted); padding: 48px 0; }
 
+.sec { margin-top: 22px; }
+.sec h3, .sec summary { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+.sec h3 small, .sec summary small { font-weight: 400; color: var(--muted); font-size: 13px; }
+.sec.best h3::before { content: "★"; color: var(--accent); }
+.sec.best .card { border-color: var(--accent); }
+.sec.more { border-top: 1px dashed var(--line); padding-top: 14px; }
+.sec.more summary { cursor: pointer; color: var(--muted); list-style: none; }
+.sec.more summary::before { content: "▸"; transition: transform .15s; }
+.sec.more[open] summary::before { transform: rotate(90deg); }
+.sec.more summary::-webkit-details-marker { display: none; }
+.card .reason { font-size: 12px; color: var(--accent); margin-top: 2px; }
+.banner .pending { color: var(--accent); animation: pulse 1s infinite alternate; }
+
 .detail { position: fixed; inset: 0; background: rgb(0 0 0 / .45); display: flex; justify-content: flex-end; z-index: 10; }
 .detail[hidden] { display: none; }
 .detail-inner {

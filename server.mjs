@@ -1,14 +1,15 @@
 // 에셋 검색 웹 서버.  node server.mjs  →  http://localhost:8080
 //  GET  /api/catalog   웹에서 쓸 에셋 목록
 //  GET  /api/status    catalog 버전 + 폴더 감시 상태
-//  POST /api/search    { q } 자연어 질문 → Claude 가 검색 조건으로 변환 → 로컬 DB 에서 매칭
+//  POST /api/search    { q } 자연어 질문 → Claude 가 검색 조건으로 변환 → 로컬 DB 에서 1차 후보 (최대 100)
+//  POST /api/rerank    { q, poolIds } 2차: Claude 가 에셋 목록을 보고 정확/관련으로 골라 준다
 //  POST /api/batch     라벨 없는 에셋을 Batch API 로 제출
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import Anthropic from '@anthropic-ai/sdk';
 import { startStatic } from './tools/static.mjs';
-import { parseQuery, runQuery } from './web/search.mjs';
+import { parseQuery, runQuery, rerank } from './web/search.mjs';
 
 const ROOT = import.meta.dirname;
 const CATALOG = path.join(ROOT, 'data', 'catalog.json');
@@ -70,18 +71,38 @@ async function api(req, res) {
       if (!q || !q.trim()) return json(res, 400, { error: '검색어가 비었습니다' }), true;
       const t0 = Date.now();
       const { query, usage, costUSD } = await parseQuery(client, q.trim());
-      const { results, relaxed } = runQuery(catalog(), query);
-      json(res, 200, { query, relaxed, ms: Date.now() - t0, usage, costUSD, results: results.slice(0, 120).map(r => ({ id: r.e.id, score: r.score, hits: r.hits })) });
+      const { results, strictCount, relaxed } = runQuery(catalog(), query);
+      json(res, 200, {
+        query, relaxed, strictCount, ms: Date.now() - t0, usage, costUSD,
+        results: results.map(r => ({ id: r.e.id, score: r.score, hits: r.hits, partial: !!r.partial })),
+      });
     } catch (err) {
-      const msg = err instanceof Anthropic.AuthenticationError ? 'API 키 오류 (.env 확인)'
-        : err instanceof Anthropic.RateLimitError ? '요청이 너무 많습니다. 잠시 후 다시 시도하세요'
-          : err instanceof Anthropic.APIError ? `API 오류 ${err.status}` : String(err.message || err);
-      console.error('search error:', msg);
-      json(res, 500, { error: msg });
+      console.error('search error:', errText(err));
+      json(res, 500, { error: errText(err) });
+    }
+    return true;
+  }
+  // 2차: Claude 가 목록을 직접 보고 골라 정확/관련으로 나눈다
+  if (url.pathname === '/api/rerank' && req.method === 'POST') {
+    try {
+      const { q, poolIds } = await readBody(req);
+      const t0 = Date.now();
+      const r = await rerank(client, String(q || '').trim(), catalog(), Array.isArray(poolIds) ? poolIds : []);
+      json(res, 200, { ...r, ms: Date.now() - t0 });
+    } catch (err) {
+      console.error('rerank error:', errText(err));
+      json(res, 500, { error: errText(err) });
     }
     return true;
   }
   return false;
+}
+
+function errText(err) {
+  if (err instanceof Anthropic.AuthenticationError) return 'API 키 오류 (.env 확인)';
+  if (err instanceof Anthropic.RateLimitError) return '요청이 너무 많습니다. 잠시 후 다시 시도하세요';
+  if (err instanceof Anthropic.APIError) return `API 오류 ${err.status}`;
+  return String(err.message || err);
 }
 
 await startStatic(ROOT, PORT, api);
