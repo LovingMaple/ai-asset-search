@@ -30,6 +30,19 @@ button, input, select { font: inherit; color: inherit; }
 .logo { font-size: 28px; color: var(--accent); }
 h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
 .brand p { margin: 0; font-size: 13px; }
+.brand > div:nth-child(2) { flex: 1; min-width: 0; }
+.watch {
+  display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 12px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line); max-width: 60%;
+}
+.watch[hidden] { display: none; }
+.watch .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+.watch.busy .dot { background: var(--accent); animation: pulse 1s infinite alternate; }
+.watch.warn .dot { background: var(--warn); }
+.watch .msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watch button { border: 0; background: var(--accent); color: #fff; border-radius: 999px; padding: 2px 10px; cursor: pointer; font-size: 12px; flex: none; }
+@keyframes pulse { to { opacity: .3; } }
+.tag.new { background: var(--ok); color: #fff; }
 
 main { padding: 16px 24px 48px; max-width: 1400px; margin: 0 auto; }
 

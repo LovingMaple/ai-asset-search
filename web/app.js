@@ -14,8 +14,15 @@ let mode = 'ai';
 let lastAI = null; // { q, data }
 
 // ---------- 데이터 ----------
-async function init() {
-  catalog = await (await fetch('/api/catalog')).json();
+let version = 0;
+const isNew = e => e.addedAt && Date.now() - new Date(e.addedAt) < 24 * 3600e3;
+// 기본 목록: 새로 들어온 에셋이 맨 앞
+const allItems = () => [...catalog].sort((a, b) => (b.addedAt || '').localeCompare(a.addedAt || '')).map(e => ({ e }));
+
+async function loadCatalog() {
+  const data = await (await fetch('/api/catalog')).json();
+  version = data.version;
+  catalog = data.items;
   byId = new Map(catalog.map(e => [e.id, e]));
   for (const e of catalog) e._ft = fieldText(e);
   const labeled = catalog.filter(e => e.labels);
@@ -23,18 +30,65 @@ async function init() {
   $('#stat').textContent = `${catalog.length}개 에셋 · 라벨 ${labeled.length}개` +
     (labeled.length ? ` · 파일명만으로는 알 수 없는 에셋 ${Math.round(vague / labeled.length * 100)}%` : '');
 
-  const types = [...new Set(labeled.map(e => e.labels.type))].sort();
-  $('#fType').insertAdjacentHTML('beforeend', types.map(t => `<option>${esc(t)}</option>`).join(''));
-  const packs = [...new Set(catalog.map(e => e.pack))].sort();
-  $('#fPack').insertAdjacentHTML('beforeend', packs.map(p => `<option>${esc(p)}</option>`).join(''));
-  $('#examples').innerHTML = EXAMPLES.map(x => `<button type="button">${esc(x)}</button>`).join('');
-
-  render(catalog.map(e => ({ e })));
+  const fill = (sel, first, values) => {
+    const cur = $(sel).value;
+    $(sel).innerHTML = `<option value="">${first}</option>` + values.map(v => `<option>${esc(v)}</option>`).join('');
+    $(sel).value = values.includes(cur) ? cur : '';
+  };
+  fill('#fType', '전체 분류', [...new Set(labeled.map(e => e.labels.type))].sort());
+  fill('#fPack', '전체 팩', [...new Set(catalog.map(e => e.pack))].sort());
 }
 
+function refreshView() {
+  if (mode === 'name') runName();
+  else if (lastAI) showAI();
+  else render(allItems());
+}
+
+async function init() {
+  await loadCatalog();
+  $('#examples').innerHTML = EXAMPLES.map(x => `<button type="button">${esc(x)}</button>`).join('');
+  refreshView();
+  pollStatus();
+  setInterval(pollStatus, 4000);
+}
+
+// 폴더 감시 상태 + catalog 가 바뀌면 화면 갱신
+async function pollStatus() {
+  let s;
+  try { s = await (await fetch('/api/status')).json(); } catch { return; }
+  const w = s.watch;
+  const el = $('#watch');
+  if (w) {
+    const busy = ['scanning', 'rendering', 'labeling', 'batch'].includes(w.state);
+    const warn = ['needs_batch', 'capped', 'error'].includes(w.state);
+    el.hidden = false;
+    el.className = 'watch' + (busy ? ' busy' : '') + (warn ? ' warn' : '');
+    el.title = `감시 폴더: ${w.watchDir}\n\n${(w.log || []).join('\n')}`;
+    el.innerHTML = `<span class="dot"></span><span class="msg">${esc(w.state === 'idle' ? '폴더 감시 중' : w.message)}</span>` +
+      (w.state === 'needs_batch' ? `<button id="batchBtn">Batch로 처리</button>` : '');
+  }
+  if (s.version !== version) {
+    await loadCatalog();
+    if (!lastAI || mode === 'name') refreshView(); // AI 결과는 다시 검색해야 반영되므로 그대로 둔다
+  }
+}
+
+$('#watch').addEventListener('click', async ev => {
+  if (ev.target.id !== 'batchBtn') return;
+  ev.target.disabled = true;
+  ev.target.textContent = '제출 중…';
+  const r = await fetch('/api/batch', { method: 'POST' });
+  const d = await r.json();
+  alert(r.ok ? d.message : `실패: ${d.error}`);
+  pollStatus();
+});
+
 function filters(list) {
-  const t = $('#fType').value, p = $('#fPack').value, rig = $('#fRig').checked;
-  return list.filter(({ e }) => (!t || e.labels?.type === t) && (!p || e.pack === p) && (!rig || e.stats?.skinned));
+  const t = $('#fType').value, p = $('#fPack').value;
+  const st = $('#fStatic').checked, sk = $('#fSkel').checked;
+  const kindOk = e => (st === sk) || (sk ? e.stats?.skinned : !e.stats?.skinned); // 둘 다 켜거나 끄면 전체
+  return list.filter(({ e }) => (!t || e.labels?.type === t) && (!p || e.pack === p) && kindOk(e));
 }
 
 // 기존 방식: 파일명/경로/팩 이름에 글자가 들어있는지
@@ -50,8 +104,8 @@ function nameHits(q, withKeywords) {
 function runName() {
   const q = $('#q').value.trim();
   $('#banner').hidden = true;
-  const list = q ? nameHits(q, $('#fKw').checked) : catalog;
-  render(list.map(e => ({ e })), q ? `"${q}" — 이름 검색 결과 없음` : '');
+  const list = q ? nameHits(q, $('#fKw').checked).map(e => ({ e })) : allItems();
+  render(list, q ? `"${q}" — 이름 검색 결과 없음` : '');
 }
 
 async function runAI(q) {
@@ -77,7 +131,7 @@ function showAI() {
   const { q, data } = lastAI;
   const chip = (g, must) => `<span class="chip ${must ? 'must' : ''}"><small>${esc(FIELD_KO[g.field] || g.field)}</small>${esc(g.terms.slice(0, 5).join(' / '))}${g.terms.length > 5 ? ' …' : ''}</span>`;
   const extra = [];
-  if (data.query.rigged !== '상관없음') extra.push(`<span class="chip must"><small>리깅</small>${esc(data.query.rigged)}</span>`);
+  if (data.query.rigged !== '상관없음') extra.push(`<span class="chip must"><small>메시</small>${data.query.rigged === '예' ? '스켈레탈' : '스태틱'}</span>`);
   if (data.query.max_triangles > 0) extra.push(`<span class="chip must"><small>폴리곤</small>≤ ${data.query.max_triangles}</span>`);
   const nameCount = nameHits(q, false).length;
   $('#banner').hidden = false;
@@ -108,6 +162,7 @@ function render(list, emptyMsg = '') {
         <div class="tags">
           ${tags.map(t => `<span class="tag ${[...hit].some(h => String(t).toLowerCase().includes(h)) ? 'hit' : ''}">${esc(t)}</span>`).join('')}
           ${L && L.name_matches_image === false ? '<span class="tag vague">이름 불명확</span>' : ''}
+          ${isNew(e) ? '<span class="tag new">NEW</span>' : ''}
         </div>
       </div>
     </button>`;
@@ -182,7 +237,7 @@ function openDetail(e) {
       <dt>착용 부위</dt><dd>${esc(L.body_part)}</dd><dt>용도</dt><dd>${kw(L.use_cases)}</dd>
       <dt>키워드</dt><dd>${kw([...L.keywords_ko, ...L.keywords_en])}</dd>` : ''}
       <dt>폴리곤</dt><dd>${(s.triangles ?? '?').toLocaleString()} 삼각형 · 메시 ${s.meshes ?? '?'}개</dd>
-      <dt>리깅</dt><dd>${s.skinned ? `예 (본 ${s.bones}개)` : '아니오'}${s.animations ? ` · 애니메이션 ${s.animations}개` : ''}</dd>
+      <dt>메시 종류</dt><dd>${s.skinned ? `스켈레탈 메시 (본 ${s.bones}개)` : '스태틱 메시'}${s.animations ? ` · 애니메이션 ${s.animations}개` : ''}</dd>
       ${L ? `<dt>라벨 확신도</dt><dd>${esc(L.confidence)}</dd>` : ''}
     </dl>
     ${src('유니티 프로젝트 경로', e.sourcePath)}`;
@@ -206,11 +261,11 @@ document.querySelectorAll('.mode').forEach(b => b.addEventListener('click', () =
   document.querySelectorAll('.mode').forEach(x => x.classList.toggle('on', x === b));
   document.body.classList.toggle('name-mode', mode === 'name');
   $('#q').placeholder = mode === 'ai' ? '예: 중세풍 붉은 상의, 귀여운 날개 달린 몬스터, red medieval top' : '예: Shield, SM_Wep, Armor body, 방패';
-  if (mode === 'name') runName(); else if (lastAI) showAI(); else { $('#banner').hidden = true; render(catalog.map(e => ({ e }))); }
+  if (mode === 'name') runName(); else if (lastAI) showAI(); else { $('#banner').hidden = true; refreshView(); }
 }));
 $('#form').addEventListener('submit', ev => { ev.preventDefault(); mode === 'ai' ? runAI($('#q').value.trim()) : runName(); });
 $('#q').addEventListener('input', () => { if (mode === 'name') runName(); });
-['#fType', '#fPack', '#fRig', '#fKw'].forEach(s => $(s).addEventListener('change', () => mode === 'name' ? runName() : lastAI ? showAI() : render(catalog.map(e => ({ e })))));
+['#fType', '#fPack', '#fStatic', '#fSkel', '#fKw'].forEach(s => $(s).addEventListener('change', refreshView));
 $('#examples').addEventListener('click', ev => {
   if (ev.target.tagName !== 'BUTTON') return;
   $('#q').value = ev.target.textContent;

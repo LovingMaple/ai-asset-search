@@ -21,6 +21,7 @@
       <h1>에셋 검색</h1>
       <p id="stat" class="muted">불러오는 중…</p>
     </div>
+    <div id="watch" class="watch" hidden></div>
   </div>
 </header>
 
@@ -37,7 +38,8 @@
     <div class="filters">
       <select id="fType"><option value="">전체 분류</option></select>
       <select id="fPack"><option value="">전체 팩</option></select>
-      <label class="check"><input type="checkbox" id="fRig"> 리깅된 것만</label>
+      <label class="check" title="뼈대 없음 — 소품, 건물, 무기 등"><input type="checkbox" id="fStatic"> 스태틱 메시</label>
+      <label class="check" title="뼈대(본) 있음 — 애니메이션 가능한 캐릭터, 동물 등"><input type="checkbox" id="fSkel"> 스켈레탈 메시</label>
       <label class="check name-only"><input type="checkbox" id="fKw" checked> 라벨 키워드 포함</label>
     </div>
     <div id="examples" class="examples"></div>

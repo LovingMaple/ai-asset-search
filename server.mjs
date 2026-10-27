@@ -1,8 +1,11 @@
 // 에셋 검색 웹 서버.  node server.mjs  →  http://localhost:8080
 //  GET  /api/catalog   웹에서 쓸 에셋 목록
+//  GET  /api/status    catalog 버전 + 폴더 감시 상태
 //  POST /api/search    { q } 자연어 질문 → Claude 가 검색 조건으로 변환 → 로컬 DB 에서 매칭
+//  POST /api/batch     라벨 없는 에셋을 Batch API 로 제출
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import Anthropic from '@anthropic-ai/sdk';
 import { startStatic } from './tools/static.mjs';
 import { parseQuery, runQuery } from './web/search.mjs';
@@ -22,7 +25,7 @@ function catalog() {
 
 const slim = e => ({
   id: e.id, name: e.name, pack: e.pack, category: e.category, file: e.file,
-  sourcePath: e.sourcePath, thumb: e.thumb.card,
+  sourcePath: e.sourcePath, thumb: e.thumb.card, addedAt: e.addedAt,
   stats: e.stats && { triangles: e.stats.triangles, meshes: e.stats.meshes, skinned: e.stats.skinned, bones: e.stats.bones, animations: e.stats.animations },
   materials: e.materials, labels: e.labels || null,
 });
@@ -38,10 +41,27 @@ const readBody = req => new Promise((resolve, reject) => {
   req.on('end', () => { try { resolve(JSON.parse(s || '{}')); } catch (e) { reject(e); } });
 });
 
+const STATUS = path.join(ROOT, 'data', 'watch-status.json');
+const readStatus = () => { try { return JSON.parse(fs.readFileSync(STATUS, 'utf8')); } catch { return null; } };
+
 async function api(req, res) {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/api/catalog') {
-    json(res, 200, catalog().map(slim));
+    json(res, 200, { version: (catalog(), cache.mtime), items: catalog().map(slim) });
+    return true;
+  }
+  // 화면이 주기적으로 불러서, catalog 가 바뀌었는지 / 폴더 감시가 뭘 하고 있는지 본다
+  if (url.pathname === '/api/status') {
+    catalog();
+    json(res, 200, { version: cache.mtime, watch: readStatus() });
+    return true;
+  }
+  // 대량으로 들어온 새 에셋을 Batch API 로 제출 (결과는 폴더 감시가 받아온다)
+  if (url.pathname === '/api/batch' && req.method === 'POST') {
+    execFile('node', ['tools/label.mjs', '--batch'], { cwd: ROOT }, (err, stdout, stderr) => {
+      if (err) return json(res, 500, { error: (stderr || err.message).trim().split('\n').pop() });
+      json(res, 200, { message: stdout.trim().split('\n').pop() });
+    });
     return true;
   }
   if (url.pathname === '/api/search' && req.method === 'POST') {

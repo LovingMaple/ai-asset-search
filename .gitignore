@@ -12,3 +12,4 @@ data/
 # 임시
 tools/_*.mjs
 __pycache__/
+incoming/

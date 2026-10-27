@@ -3,6 +3,8 @@
 //   node tools/label.mjs --test 10     일반 호출로 N개만 (팩별로 고르게) — 품질/비용 확인용
 //   node tools/label.mjs --batch       라벨 없는 나머지 전부를 Batch API 로 제출 (50% 할인)
 //   node tools/label.mjs --collect     제출한 배치 결과를 받아 catalog 에 합친다
+//   node tools/label.mjs --auto        라벨 없는 것을 일반 호출로 (폴더 감시용). 비용 안전장치:
+//                                       AUTO_MAX 개 초과면 하지 않고 종료코드 2, 하루 DAILY_CAP_USD 초과면 중단
 import fs from 'node:fs';
 import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
@@ -14,7 +16,20 @@ process.loadEnvFile(path.join(ROOT, '.env'));
 
 const MODEL = 'claude-opus-5-5';
 const PRICE = { input: 4 / 1e6, output: 20 / 1e6 }; // $/token, Batch 는 절반
+const AUTO_MAX = +(process.env.AUTO_MAX || 50);
+const DAILY_CAP_USD = +(process.env.DAILY_CAP_USD || 1);
+const USAGE = path.join(ROOT, 'data', 'usage.json');
 const client = new Anthropic();
+
+// 하루 사용액 기록 (자동 라벨링 상한 판단용)
+const today = () => new Date().toLocaleDateString('sv'); // YYYY-MM-DD
+const readUsage = () => { try { return JSON.parse(fs.readFileSync(USAGE, 'utf8')); } catch { return {}; } };
+const spentToday = () => readUsage()[today()] || 0;
+function addUsage(usd) {
+  const u = readUsage();
+  u[today()] = +((u[today()] || 0) + usd).toFixed(5);
+  fs.writeFileSync(USAGE, JSON.stringify(u, null, 1));
+}
 
 const TYPES = ['캐릭터', '의상/장비', '무기', '소품', '가구', '건물/구조물', '환경/자연', '탈것', '동물', '몬스터/크리처', '음식', '기타'];
 const PARTS = ['머리', '상의', '하의', '손', '발', '등/망토', '전신', '해당없음'];
@@ -91,7 +106,24 @@ function parseMessage(msg) {
 
 const cost = (u, batch) => ((u.input_tokens + (u.cache_read_input_tokens || 0)) * PRICE.input + u.output_tokens * PRICE.output) * (batch ? 0.5 : 1);
 const load = () => JSON.parse(fs.readFileSync(CATALOG, 'utf8'));
-const save = c => fs.writeFileSync(CATALOG, JSON.stringify(c, null, 1));
+// 서버/감시가 동시에 읽으므로 임시 파일에 쓰고 바꿔치기
+const save = c => { fs.writeFileSync(CATALOG + '.tmp', JSON.stringify(c, null, 1)); fs.renameSync(CATALOG + '.tmp', CATALOG); };
+
+// 한 개 라벨링 후 그 자리에서 catalog 에 반영 (다른 프로세스가 그 사이 추가한 항목을 덮어쓰지 않게 다시 읽는다)
+async function labelOne(e) {
+  const msg = await client.messages.create(params(e));
+  const labels = parseMessage(msg);
+  const c = cost(msg.usage, false);
+  addUsage(c);
+  const cat = load();
+  const cur = cat.find(x => x.id === e.id);
+  if (cur) {
+    cur.labels = labels;
+    cur.labelMeta = { model: MODEL, mode: 'direct', usage: msg.usage, costUSD: +c.toFixed(5) };
+    save(cat);
+  }
+  return { labels, usage: msg.usage, cost: c };
+}
 const pending = c => c.filter(e => e.thumb && !e.labels);
 
 function errMsg(err) {
@@ -111,29 +143,54 @@ async function runTest(n) {
   while (picks.length < n && [...byPack.values()].some(v => v.length)) {
     for (const v of byPack.values()) if (v.length && picks.length < n) picks.push(v.shift());
   }
-  let total = 0;
+  let total = 0, done = 0;
   for (const e of picks) {
     try {
-      const msg = await client.messages.create(params(e));
-      e.labels = parseMessage(msg);
-      const c = cost(msg.usage, false);
-      total += c;
-      e.labelMeta = { model: MODEL, mode: 'direct', usage: msg.usage, costUSD: +c.toFixed(5) };
-      console.log(`\n■ ${e.id}  (in ${msg.usage.input_tokens} / out ${msg.usage.output_tokens} tok, $${c.toFixed(4)})`);
-      console.log(`  ${e.labels.type} > ${e.labels.subtype} | ${e.labels.name_ko}`);
-      console.log(`  ${e.labels.description}`);
-      console.log(`  색:${e.labels.colors.join(',')}  재질:${e.labels.materials.join(',')}  스타일:${e.labels.style.join(',')}  부위:${e.labels.body_part}`);
-      console.log(`  ko:${e.labels.keywords_ko.join(',')}`);
-      console.log(`  en:${e.labels.keywords_en.join(',')}  이름일치:${e.labels.name_matches_image}  확신:${e.labels.confidence}`);
-      save(catalog);
+      const { labels: L, usage: u, cost: c } = await labelOne(e);
+      total += c; done++;
+      console.log(`\n■ ${e.id}  (in ${u.input_tokens} / out ${u.output_tokens} tok, $${c.toFixed(4)})`);
+      console.log(`  ${L.type} > ${L.subtype} | ${L.name_ko}`);
+      console.log(`  ${L.description}`);
+      console.log(`  색:${L.colors.join(',')}  재질:${L.materials.join(',')}  스타일:${L.style.join(',')}  부위:${L.body_part}`);
+      console.log(`  ko:${L.keywords_ko.join(',')}`);
+      console.log(`  en:${L.keywords_en.join(',')}  이름일치:${L.name_matches_image}  확신:${L.confidence}`);
     } catch (err) {
       console.error(`FAIL ${e.id}: ${errMsg(err)}`);
       if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) break;
     }
   }
-  const avg = total / Math.max(1, picks.filter(e => e.labels).length);
+  const avg = total / Math.max(1, done);
+  const left = pending(load()).length;
   console.log(`\n합계 $${total.toFixed(4)}, 개당 평균 $${avg.toFixed(4)}`);
-  console.log(`남은 ${pending(catalog).length}개를 Batch 로 돌리면 약 $${(avg * pending(catalog).length / 2).toFixed(2)} 예상`);
+  console.log(`남은 ${left}개를 Batch 로 돌리면 약 $${(avg * left / 2).toFixed(2)} 예상`);
+}
+
+// 폴더 감시에서 부른다. 결과는 마지막 줄 JSON 으로 알린다.
+async function runAuto() {
+  // 진행 중인 배치에 이미 들어간 에셋은 배치가 처리하므로 제외
+  const inBatch = fs.existsSync(BATCH_STATE) ? new Set(Object.values(JSON.parse(fs.readFileSync(BATCH_STATE, 'utf8')).idMap)) : new Set();
+  const todo = pending(load()).filter(e => !inBatch.has(e.id));
+  const report = r => { console.log(JSON.stringify(r)); process.exitCode = r.code || 0; };
+  if (!todo.length) return report({ labeled: 0 });
+  if (inBatch.size && todo.length > AUTO_MAX) return report({ code: 3, waiting: todo.length, reason: '배치 진행 중 — 끝난 뒤 처리' });
+  if (todo.length > AUTO_MAX) return report({ code: 2, waiting: todo.length, reason: `한 번에 ${todo.length}개 — Batch 권장` });
+  let labeled = 0, spent = 0;
+  for (const e of todo) {
+    if (spentToday() >= DAILY_CAP_USD) {
+      return report({ code: 4, labeled, spent, waiting: todo.length - labeled, reason: `오늘 자동 라벨링 상한 $${DAILY_CAP_USD} 도달` });
+    }
+    try {
+      spent += (await labelOne(e)).cost;
+      labeled++;
+      console.error(`labeled ${e.id}`);
+    } catch (err) {
+      console.error(`FAIL ${e.id}: ${errMsg(err)}`);
+      if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) {
+        return report({ code: 5, labeled, spent, reason: errMsg(err) });
+      }
+    }
+  }
+  report({ labeled, spent: +spent.toFixed(4) });
 }
 
 async function runBatch() {
@@ -159,21 +216,21 @@ async function runCollect() {
   const batch = await client.messages.batches.retrieve(state.id);
   console.log(`상태: ${batch.processing_status}`, batch.request_counts);
   if (batch.processing_status !== 'ended') return;
-  const catalog = load();
-  const byId = new Map(catalog.map(e => [e.id, e]));
+  // 결과를 먼저 다 받은 뒤 catalog 를 읽어 합친다 (받는 동안 다른 프로세스가 쓴 내용을 덮지 않게)
+  const got = new Map();
   let ok = 0, bad = 0, total = 0;
   for await (const r of await client.messages.batches.results(state.id)) {
-    const e = byId.get(state.idMap[r.custom_id]);
-    if (!e) continue;
-    if (r.result.type !== 'succeeded') { bad++; console.error(`FAIL ${e.id}: ${r.result.type}`); continue; }
+    const id = state.idMap[r.custom_id];
+    if (r.result.type !== 'succeeded') { bad++; console.error(`FAIL ${id}: ${r.result.type}`); continue; }
     try {
-      e.labels = parseMessage(r.result.message);
       const c = cost(r.result.message.usage, true);
+      got.set(id, { labels: parseMessage(r.result.message), labelMeta: { model: MODEL, mode: 'batch', usage: r.result.message.usage, costUSD: +c.toFixed(5) } });
       total += c;
-      e.labelMeta = { model: MODEL, mode: 'batch', usage: r.result.message.usage, costUSD: +c.toFixed(5) };
       ok++;
-    } catch (err) { bad++; console.error(`FAIL ${e.id}: ${err.message}`); }
+    } catch (err) { bad++; console.error(`FAIL ${id}: ${err.message}`); }
   }
+  const catalog = load();
+  for (const e of catalog) if (got.has(e.id)) Object.assign(e, got.get(e.id));
   save(catalog);
   fs.renameSync(BATCH_STATE, BATCH_STATE.replace('.json', `.${state.id}.done.json`));
   console.log(`성공 ${ok}, 실패 ${bad}, 배치 비용 약 $${total.toFixed(2)}. 실패분은 --test 나 --batch 로 다시 돌릴 수 있습니다.`);
@@ -183,4 +240,5 @@ const a = process.argv.slice(2);
 if (a[0] === '--test') await runTest(+(a[1] || 10));
 else if (a[0] === '--batch') await runBatch();
 else if (a[0] === '--collect') await runCollect();
-else console.log('usage: --test N | --batch | --collect');
+else if (a[0] === '--auto') await runAuto();
+else console.log('usage: --test N | --batch | --collect | --auto');
